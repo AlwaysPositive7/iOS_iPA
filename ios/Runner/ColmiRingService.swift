@@ -153,6 +153,7 @@ final class ColmiRingService: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     let peripheral: CBPeripheral
     var name: String
     var rssi: Int
+    var isLikelyRing: Bool
   }
 
   private let healthStore: HKHealthStore
@@ -180,12 +181,19 @@ final class ColmiRingService: NSObject, CBCentralManagerDelegate, CBPeripheralDe
 
   func snapshot() -> [String: Any] {
     let devices = rings.values
-      .sorted { $0.rssi > $1.rssi }
+      .sorted {
+        if $0.isLikelyRing != $1.isLikelyRing {
+          return $0.isLikelyRing && !$1.isLikelyRing
+        }
+        return $0.rssi > $1.rssi
+      }
+      .prefix(30)
       .map { ring in
         [
           "id": ring.peripheral.identifier.uuidString,
           "name": ring.name,
           "rssi": ring.rssi,
+          "isLikelyRing": ring.isLikelyRing,
         ] as [String: Any]
       }
 
@@ -209,11 +217,28 @@ final class ColmiRingService: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     }
 
     rings.removeAll()
+
+    // A QRing connection can linger briefly after its app closes, during
+    // which the ring may stop advertising. Ask iOS for already-connected
+    // peripherals so the user can still select it.
+    for connected in central.retrieveConnectedPeripherals(
+      withServices: [ColmiUUID.serviceV1, ColmiUUID.serviceV2]
+    ) {
+      rings[connected.identifier] = DiscoveredRing(
+        peripheral: connected,
+        name: connected.name ?? "Connected QRing device",
+        rssi: 0,
+        isLikelyRing: true
+      )
+    }
+
     isScanning = true
-    status = "Scanning for R04 / QRing devices…"
+    status = rings.isEmpty
+      ? "Scanning for nearby Bluetooth devices…"
+      : "Found a connected QRing device; scanning for more…"
     central.scanForPeripherals(
       withServices: nil,
-      options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+      options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
     )
 
     scanTimeout?.cancel()
@@ -222,9 +247,9 @@ final class ColmiRingService: NSObject, CBCentralManagerDelegate, CBPeripheralDe
       self.central.stopScan()
       self.isScanning = false
       if self.rings.isEmpty {
-        self.status = "No QRing-compatible R04 found. Wake the ring, close QRing, and scan again. SmartHealth firmware uses a different protocol."
+        self.status = "No named Bluetooth devices were visible. Wake the ring, fully close QRing, toggle Bluetooth off/on, and scan again."
       } else {
-        self.status = "Select your ring and tap Connect."
+        self.status = "Select the R04 (it may use a generic name such as SMART_RING) and tap Connect."
       }
     }
     scanTimeout = timeout
@@ -323,15 +348,21 @@ final class ColmiRingService: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     let serviceUUIDs = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
     let hasQRingService = serviceUUIDs.contains(ColmiUUID.serviceV1)
       || serviceUUIDs.contains(ColmiUUID.serviceV2)
-    let looksLikeR04 = normalizedName.contains("R04")
+    let likelyNameTokens = ["R04", "RING", "COLMI", "QRING", "SR0", "R0"]
+    let looksLikeRing = likelyNameTokens.contains { normalizedName.contains($0) }
 
-    guard hasQRingService || looksLikeR04 else { return }
+    // Match PulseLoop's discovery behavior: list every named peripheral. Some
+    // QRing firmwares advertise a generic name and omit service UUIDs, so the
+    // protocol can only be confirmed after the user connects and services are
+    // discovered.
+    guard !advertisedName.isEmpty else { return }
     rings[peripheral.identifier] = DiscoveredRing(
       peripheral: peripheral,
       name: advertisedName,
-      rssi: RSSI.intValue
+      rssi: RSSI.intValue,
+      isLikelyRing: hasQRingService || looksLikeRing
     )
-    status = "Found \(rings.count) possible ring\(rings.count == 1 ? "" : "s")."
+    status = "Found \(rings.count) named Bluetooth device\(rings.count == 1 ? "" : "s"); likely rings are listed first."
   }
 
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {

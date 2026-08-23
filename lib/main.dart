@@ -352,7 +352,10 @@ class _HealthSettingsPageState extends State<HealthSettingsPage> {
                           .map(
                             (device) => DropdownMenuItem(
                               value: device.id,
-                              child: Text('${device.name} (${device.rssi} dBm)'),
+                              child: Text(
+                                '${device.name}${device.isLikelyRing ? ' • likely ring' : ''} (${device.rssi} dBm)',
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
                           )
                           .toList(),
@@ -408,6 +411,11 @@ class _HealthSettingsPageState extends State<HealthSettingsPage> {
                   Text(
                     _ringState?.status ?? 'Bluetooth ring service is starting…',
                     style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'The R04 may appear under a generic name such as SMART_RING. Connecting is safe: Daymark verifies the QRing sleep service before sending a command.',
+                    style: TextStyle(fontSize: 12),
                   ),
                 ],
               ),
