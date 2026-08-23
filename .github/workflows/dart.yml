@@ -30,8 +30,18 @@ jobs:
           flutter --version
           xcodebuild -version
 
+      - name: Use CocoaPods for iOS plugins
+        run: flutter config --no-enable-swift-package-manager
+
       - name: Install Flutter packages
         run: flutter pub get
+
+      - name: Reinstall iOS pods cleanly
+        working-directory: ios
+        run: |
+          pod deintegrate
+          rm -rf Pods Podfile.lock
+          pod install --repo-update
 
       - name: Build iOS app without code signing
         run: flutter build ios --release --no-codesign
