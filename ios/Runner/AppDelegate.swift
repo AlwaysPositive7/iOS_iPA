@@ -96,9 +96,11 @@ import UIKit
     guard HKHealthStore.isHealthDataAvailable() else { return }
 
     let typeNames = UserDefaults.standard.stringArray(forKey: typesKey) ?? []
+    var observedIdentifiers = Set<String>()
 
     for name in typeNames {
-      guard let type = quantityType(for: name) else { continue }
+      guard let type = sampleType(for: name) else { continue }
+      guard observedIdentifiers.insert(type.identifier).inserted else { continue }
 
       let query = HKObserverQuery(
         sampleType: type,
@@ -167,22 +169,29 @@ import UIKit
   ) {
     let defaults = UserDefaults.standard
     let typeNames = defaults.stringArray(forKey: typesKey) ?? []
+    let sleepTypeNames = Set(typeNames.filter(isSleepTypeName))
     let appleWatchOnly = defaults.bool(forKey: watchOnlyKey)
 
     let now = Date()
     let start = Calendar.current.startOfDay(for: now)
-    let predicate = HKQuery.predicateForSamples(
-      withStart: start,
-      end: now,
-      options: [.strictStartDate]
-    )
+    let sleepWindowStart = Calendar.current.date(
+      byAdding: .hour,
+      value: -6,
+      to: start
+    ) ?? start
 
     let group = DispatchGroup()
     let lock = NSLock()
     var allSamples: [[String: Any]] = []
 
-    for name in typeNames {
+    for name in typeNames where !isSleepTypeName(name) {
       guard let type = quantityType(for: name) else { continue }
+
+      let predicate = HKQuery.predicateForSamples(
+        withStart: start,
+        end: now,
+        options: [.strictStartDate]
+      )
 
       group.enter()
       let query = HKSampleQuery(
@@ -223,13 +232,65 @@ import UIKit
       healthStore.execute(query)
     }
 
+    // Sleep is a category sample, not a quantity sample. Query it once even
+    // though the Flutter UI selects several stage names that all map to the
+    // same HealthKit sleepAnalysis type.
+    if !sleepTypeNames.isEmpty,
+       let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) {
+      let sleepPredicate = HKQuery.predicateForSamples(
+        withStart: sleepWindowStart,
+        end: now,
+        options: [.strictStartDate]
+      )
+
+      group.enter()
+      let query = HKSampleQuery(
+        sampleType: sleepType,
+        predicate: sleepPredicate,
+        limit: HKObjectQueryNoLimit,
+        sortDescriptors: [NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)]
+      ) { [weak self] _, samples, _ in
+        defer { group.leave() }
+        guard let self, let categorySamples = samples as? [HKCategorySample] else { return }
+
+        let serialized = categorySamples.compactMap { sample -> [String: Any]? in
+          guard let typeName = self.sleepTypeName(for: sample.value) else { return nil }
+          guard sleepTypeNames.contains(typeName) else { return nil }
+
+          if appleWatchOnly && !self.looksLikeAppleWatch(sample) {
+            return nil
+          }
+
+          return [
+            "uuid": sample.uuid.uuidString,
+            "type": typeName,
+            "stage": self.sleepStageLabel(for: sample.value),
+            "value": sample.value,
+            "durationMinutes": sample.endDate.timeIntervalSince(sample.startDate) / 60,
+            "unit": "category",
+            "dateFrom": ISO8601DateFormatter().string(from: sample.startDate),
+            "dateTo": ISO8601DateFormatter().string(from: sample.endDate),
+            "sourceName": sample.sourceRevision.source.name,
+            "sourceBundle": sample.sourceRevision.source.bundleIdentifier,
+            "deviceModel": sample.device?.model ?? "",
+          ]
+        }
+
+        lock.lock()
+        allSamples.append(contentsOf: serialized)
+        lock.unlock()
+      }
+
+      healthStore.execute(query)
+    }
+
     group.notify(queue: .global(qos: .utility)) {
       let formatter = DateFormatter()
       formatter.calendar = Calendar.current
       formatter.locale = Locale(identifier: "en_US_POSIX")
       formatter.dateFormat = "yyyy-MM-dd"
 
-      completion([
+      var payload: [String: Any] = [
         "date": formatter.string(from: now),
         "generatedAt": ISO8601DateFormatter().string(from: now),
         "startTime": ISO8601DateFormatter().string(from: start),
@@ -238,7 +299,14 @@ import UIKit
         "selectedTypes": typeNames,
         "samples": allSamples,
         "source": "healthkit-background",
-      ])
+      ]
+
+      if !sleepTypeNames.isEmpty {
+        payload["sleepWindowStart"] = ISO8601DateFormatter().string(from: sleepWindowStart)
+        payload["summary"] = ["SLEEP": self.makeSleepSummary(from: allSamples)]
+      }
+
+      completion(payload)
     }
   }
 
@@ -285,6 +353,93 @@ import UIKit
 
       completion(true)
     }.resume()
+  }
+
+  private func sampleType(for name: String) -> HKSampleType? {
+    if isSleepTypeName(name) {
+      return HKObjectType.categoryType(forIdentifier: .sleepAnalysis)
+    }
+
+    return quantityType(for: name)
+  }
+
+  private func isSleepTypeName(_ name: String) -> Bool {
+    switch name {
+    case "SLEEP_ASLEEP", "SLEEP_AWAKE", "SLEEP_DEEP", "SLEEP_IN_BED", "SLEEP_LIGHT", "SLEEP_REM":
+      return true
+    default:
+      return false
+    }
+  }
+
+  private func sleepTypeName(for value: Int) -> String? {
+    switch value {
+    case 0:
+      return "SLEEP_IN_BED"
+    case 1:
+      return "SLEEP_ASLEEP"
+    case 2:
+      return "SLEEP_AWAKE"
+    case 3:
+      return "SLEEP_LIGHT"
+    case 4:
+      return "SLEEP_DEEP"
+    case 5:
+      return "SLEEP_REM"
+    default:
+      return nil
+    }
+  }
+
+  private func sleepStageLabel(for value: Int) -> String {
+    switch value {
+    case 0:
+      return "inBed"
+    case 1:
+      return "asleepUnspecified"
+    case 2:
+      return "awake"
+    case 3:
+      return "core"
+    case 4:
+      return "deep"
+    case 5:
+      return "rem"
+    default:
+      return "unknown"
+    }
+  }
+
+  private func makeSleepSummary(from samples: [[String: Any]]) -> [String: Any] {
+    var minutesByType: [String: Double] = [:]
+    var sleepSampleCount = 0
+
+    for sample in samples {
+      guard
+        let type = sample["type"] as? String,
+        isSleepTypeName(type),
+        let minutes = sample["durationMinutes"] as? Double
+      else { continue }
+
+      minutesByType[type, default: 0] += minutes
+      sleepSampleCount += 1
+    }
+
+    let totalAsleep =
+      minutesByType["SLEEP_ASLEEP", default: 0]
+      + minutesByType["SLEEP_LIGHT", default: 0]
+      + minutesByType["SLEEP_DEEP", default: 0]
+      + minutesByType["SLEEP_REM", default: 0]
+
+    return [
+      "totalAsleepMinutes": totalAsleep,
+      "coreMinutes": minutesByType["SLEEP_LIGHT", default: 0],
+      "deepMinutes": minutesByType["SLEEP_DEEP", default: 0],
+      "remMinutes": minutesByType["SLEEP_REM", default: 0],
+      "awakeMinutes": minutesByType["SLEEP_AWAKE", default: 0],
+      "inBedMinutes": minutesByType["SLEEP_IN_BED", default: 0],
+      "samples": sleepSampleCount,
+    ]
   }
 
   private func quantityType(for name: String) -> HKQuantityType? {
@@ -334,7 +489,7 @@ import UIKit
     }
   }
 
-  private func looksLikeAppleWatch(_ sample: HKQuantitySample) -> Bool {
+  private func looksLikeAppleWatch(_ sample: HKSample) -> Bool {
     let source = sample.sourceRevision.source.name.lowercased()
     let model = (sample.device?.model ?? "").lowercased()
     return source.contains("watch") || model.contains("watch")
