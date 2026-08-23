@@ -30,9 +30,13 @@ sleep stages into Apple Health. It supports the QRing Bluetooth firmware family:
 1. Charge and wake the ring, then fully close the QRing app so it releases the
    Bluetooth connection.
 2. In Daymark Health, tap **Scan** in the COLMI R04 section.
-3. Select the ring, tap **Connect**, and wait for “Ready to sync sleep.”
-4. Tap **Sync Sleep to Apple Health** and approve Apple Health write access.
-5. Use **Send Today Now**, or leave background sync enabled, to send the newly
+3. Select the ring and tap **Connect**. Some QRing models advertise a generic
+   name such as `SMART_RING`, so Daymark lists every named nearby Bluetooth
+   device and ranks likely ring names first. It verifies the protocol after
+   connection before sending any command.
+4. Wait for “Ready to sync sleep.”
+5. Tap **Sync Sleep to Apple Health** and approve Apple Health write access.
+6. Use **Send Today Now**, or leave background sync enabled, to send the newly
    imported sleep data to Daymark.
 
 COLMI has shipped similar model names with different protocol families. If the

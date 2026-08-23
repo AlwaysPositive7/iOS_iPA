@@ -4,11 +4,13 @@ class ColmiRingDevice {
   final String id;
   final String name;
   final int rssi;
+  final bool isLikelyRing;
 
   const ColmiRingDevice({
     required this.id,
     required this.name,
     required this.rssi,
+    required this.isLikelyRing,
   });
 
   factory ColmiRingDevice.fromMap(Map<Object?, Object?> map) {
@@ -16,6 +18,7 @@ class ColmiRingDevice {
       id: map['id'] as String,
       name: (map['name'] as String?) ?? 'COLMI ring',
       rssi: (map['rssi'] as num?)?.toInt() ?? 0,
+      isLikelyRing: (map['isLikelyRing'] as bool?) ?? false,
     );
   }
 }
