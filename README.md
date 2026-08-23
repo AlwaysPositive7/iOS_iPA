@@ -17,6 +17,7 @@ Actions tab.
    `https://daymark-eight-sepia.vercel.app/api/health`.
 3. Leave the bearer token blank for the current unauthenticated endpoint.
 4. Choose the health metrics and whether to keep only Apple Watch samples.
+   Sleep includes total time asleep, core, deep, REM, awake, and time in bed.
 5. Tap **Request HealthKit Permission** and allow the categories in iOS.
 6. Tap **Send Today Now** to test the webhook.
 7. Tap **Enable Background Sync**.
@@ -27,6 +28,8 @@ Actions tab.
   iOS 15 or newer.
 - Background HealthKit delivery is event-driven. The chosen interval is a
   minimum delay between webhook posts, not an exact timer guaranteed by iOS.
+- The sleep window starts at 6 PM on the previous day so an overnight session
+  that crosses midnight is included with the day on which you wake up.
 - Health data may be unavailable while the phone is locked. A later HealthKit
   event or a manual foreground sync catches the dashboard up.
 - The IPA is unsigned. The sideloading service must re-sign the HealthKit
