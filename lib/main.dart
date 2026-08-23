@@ -54,6 +54,7 @@ class _HealthSettingsPageState extends State<HealthSettingsPage> {
     HealthDataType.HEART_RATE,
     HealthDataType.RESTING_HEART_RATE,
     HealthDataType.HEART_RATE_VARIABILITY_SDNN,
+    ...sleepMetricTypes,
   };
 
   bool _appleWatchOnly = true;
@@ -76,6 +77,8 @@ class _HealthSettingsPageState extends State<HealthSettingsPage> {
     final interval = await prefs.getInt('intervalMinutes');
     final watchOnly = await prefs.getBool('appleWatchOnly');
     final selectedNames = await prefs.getStringList('selectedTypes');
+    final sleepMetricIntroduced =
+        await prefs.getBool('sleepMetricIntroduced') ?? false;
 
     if (!mounted) return;
     setState(() {
@@ -89,11 +92,25 @@ class _HealthSettingsPageState extends State<HealthSettingsPage> {
           ..clear()
           ..addAll(
             supportedMetrics
-                .where((m) => selectedNames.contains(m.type.name))
-                .map((m) => m.type),
+                .expand((metric) => metric.types)
+                .where((type) => selectedNames.contains(type.name)),
           );
       }
+
+      // Add sleep on the first launch of the sleep-enabled build, including
+      // when upgrading over the original IPA with saved settings.
+      if (!sleepMetricIntroduced) {
+        _selected.addAll(sleepMetricTypes);
+      }
     });
+
+    if (!sleepMetricIntroduced) {
+      await prefs.setBool('sleepMetricIntroduced', true);
+      await prefs.setStringList(
+        'selectedTypes',
+        _selected.map((type) => type.name).toList(),
+      );
+    }
   }
 
   Future<void> _saveSettings() async {
@@ -223,15 +240,20 @@ class _HealthSettingsPageState extends State<HealthSettingsPage> {
             (metric) => CheckboxListTile(
               contentPadding: EdgeInsets.zero,
               title: Text(metric.label),
-              value: _selected.contains(metric.type),
+              subtitle: metric.label.startsWith('Sleep')
+                  ? const Text(
+                      'Includes total asleep, core, deep, REM, awake, and time in bed.',
+                    )
+                  : null,
+              value: metric.types.every(_selected.contains),
               onChanged: _busy
                   ? null
                   : (value) {
                       setState(() {
                         if (value == true) {
-                          _selected.add(metric.type);
+                          _selected.addAll(metric.types);
                         } else {
-                          _selected.remove(metric.type);
+                          _selected.removeAll(metric.types);
                         }
                       });
                     },
