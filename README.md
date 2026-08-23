@@ -35,9 +35,18 @@ sleep stages into Apple Health. It supports the QRing Bluetooth firmware family:
    device and ranks likely ring names first. It verifies the protocol after
    connection before sending any command.
 4. Wait for “Ready to sync sleep.”
-5. Tap **Sync Sleep to Apple Health** and approve Apple Health write access.
+5. Tap **Sync Ring Sleep** and approve Apple Health write access when the app
+   was installed with a HealthKit-capable signing profile.
 6. Use **Send Today Now**, or leave background sync enabled, to send the newly
    imported sleep data to Daymark.
+
+HealthKit requires `com.apple.developer.healthkit` in the provisioning profile
+that signs the installed app. Free SideStore/Personal Team profiles do not grant
+that advanced capability. If HealthKit authorization fails for that reason,
+Daymark still downloads the current overnight sleep window and posts the decoded
+stages directly to the configured Daymark webhook. Direct fallback data does not
+appear inside Apple's Health app; actual Health insertion requires a paid Apple
+Developer Program profile with HealthKit enabled or App Store/TestFlight signing.
 
 COLMI has shipped similar model names with different protocol families. If the
 R04 was supplied for the SmartHealth app rather than QRing, it will not expose

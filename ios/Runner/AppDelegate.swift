@@ -73,9 +73,19 @@ import UIKit
         }
       }
 
-      let ringService = ColmiRingService(healthStore: healthStore) { [weak self] in
-        self?.handleHealthKitChange(completion: {})
-      }
+      let ringService = ColmiRingService(
+        healthStore: healthStore,
+        onSleepSaved: { [weak self] in
+          self?.handleHealthKitChange(completion: {})
+        },
+        onDirectDaymarkSync: { [weak self] payload, completion in
+          guard let self else {
+            completion(false)
+            return
+          }
+          self.postPayload(payload, completion: completion)
+        }
+      )
       colmiRingService = ringService
 
       let colmiChannel = FlutterMethodChannel(
@@ -119,6 +129,14 @@ import UIKit
           result(nil)
 
         case "syncSleep":
+          if let args = call.arguments as? [String: Any] {
+            if let webhookUrl = args["webhookUrl"] as? String {
+              UserDefaults.standard.set(webhookUrl, forKey: self.webhookKey)
+            }
+            if let bearerToken = args["bearerToken"] as? String {
+              UserDefaults.standard.set(bearerToken, forKey: self.tokenKey)
+            }
+          }
           ringService.syncSleep()
           result(nil)
 

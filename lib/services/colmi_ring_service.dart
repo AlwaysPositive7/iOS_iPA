@@ -74,5 +74,12 @@ class ColmiRingService {
 
   Future<void> disconnect() => _channel.invokeMethod<void>('disconnect');
 
-  Future<void> syncSleep() => _channel.invokeMethod<void>('syncSleep');
+  Future<void> syncSleep({
+    required String webhookUrl,
+    required String bearerToken,
+  }) =>
+      _channel.invokeMethod<void>('syncSleep', {
+        'webhookUrl': webhookUrl,
+        'bearerToken': bearerToken,
+      });
 }

@@ -391,11 +391,16 @@ class _HealthSettingsPageState extends State<HealthSettingsPage> {
                                 !(_ringState?.isConnected ?? false) ||
                                 (_ringState?.isSyncing ?? false)
                             ? null
-                            : () => _runRing(_ring.syncSleep),
+                            : () => _runRing(
+                                  () => _ring.syncSleep(
+                                    webhookUrl: _urlController.text.trim(),
+                                    bearerToken: _tokenController.text.trim(),
+                                  ),
+                                ),
                         child: Text(
                           (_ringState?.isSyncing ?? false)
                               ? 'Syncing…'
-                              : 'Sync Sleep to Apple Health',
+                              : 'Sync Ring Sleep',
                         ),
                       ),
                       TextButton(
@@ -415,6 +420,11 @@ class _HealthSettingsPageState extends State<HealthSettingsPage> {
                   const SizedBox(height: 6),
                   const Text(
                     'The R04 may appear under a generic name such as SMART_RING. Connecting is safe: Daymark verifies the QRing sleep service before sending a command.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Free SideStore signing cannot write Apple Health. When that entitlement is unavailable, this button sends the decoded sleep directly to the configured Daymark webhook instead.',
                     style: TextStyle(fontSize: 12),
                   ),
                 ],
