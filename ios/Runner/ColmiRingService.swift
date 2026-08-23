@@ -149,6 +149,11 @@ private enum ColmiSleepDecoder {
 }
 
 final class ColmiRingService: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
+  private enum SyncDestination: Equatable {
+    case healthKit
+    case directDaymark
+  }
+
   private struct DiscoveredRing {
     let peripheral: CBPeripheral
     var name: String
@@ -158,6 +163,7 @@ final class ColmiRingService: NSObject, CBCentralManagerDelegate, CBPeripheralDe
 
   private let healthStore: HKHealthStore
   private let onSleepSaved: () -> Void
+  private let onDirectDaymarkSync: ([String: Any], @escaping (Bool) -> Void) -> Void
   private var central: CBCentralManager!
   private var rings: [UUID: DiscoveredRing] = [:]
   private var peripheral: CBPeripheral?
@@ -167,14 +173,21 @@ final class ColmiRingService: NSObject, CBCentralManagerDelegate, CBPeripheralDe
   private var expectedBigDataLength: Int?
   private var scanTimeout: DispatchWorkItem?
   private var syncTimeout: DispatchWorkItem?
+  private var syncDestination: SyncDestination = .healthKit
+  private var healthWriteFailure: String?
 
   private(set) var isScanning = false
   private(set) var isSyncing = false
   private(set) var status = "Ready to scan for a COLMI R04"
 
-  init(healthStore: HKHealthStore, onSleepSaved: @escaping () -> Void) {
+  init(
+    healthStore: HKHealthStore,
+    onSleepSaved: @escaping () -> Void,
+    onDirectDaymarkSync: @escaping ([String: Any], @escaping (Bool) -> Void) -> Void
+  ) {
     self.healthStore = healthStore
     self.onSleepSaved = onSleepSaved
+    self.onDirectDaymarkSync = onDirectDaymarkSync
     super.init()
     central = CBCentralManager(delegate: self, queue: .main)
   }
@@ -309,21 +322,11 @@ final class ColmiRingService: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     ) { [weak self] success, error in
       DispatchQueue.main.async {
         guard let self else { return }
-        guard success else {
-          self.isSyncing = false
-          self.status = "Apple Health did not allow sleep writes: \(error?.localizedDescription ?? "permission denied")"
-          return
-        }
-
-        self.bigDataBuffer.removeAll()
-        self.expectedBigDataLength = nil
-        let request = Data([0xbc, 0x27, 0x01, 0x00, 0xff, 0x00, 0xff])
-        let writeType: CBCharacteristicWriteType = commandCharacteristic.properties.contains(.write)
-          ? .withResponse
-          : .withoutResponse
-        peripheral.writeValue(request, for: commandCharacteristic, type: writeType)
-        self.status = "Downloading recent sleep from \(peripheral.name ?? "R04")…"
-        self.startSyncTimeout()
+        self.syncDestination = success ? .healthKit : .directDaymark
+        self.healthWriteFailure = success
+          ? nil
+          : (error?.localizedDescription ?? "permission denied")
+        self.requestRingSleep(peripheral, commandCharacteristic: commandCharacteristic)
       }
     }
   }
@@ -492,7 +495,12 @@ final class ColmiRingService: NSObject, CBCentralManagerDelegate, CBPeripheralDe
         packet,
         peripheralID: peripheral.identifier.uuidString
       )
-      saveToHealth(stages, peripheral: peripheral)
+      switch syncDestination {
+      case .healthKit:
+        saveToHealth(stages, peripheral: peripheral)
+      case .directDaymark:
+        uploadDirectlyToDaymark(stages)
+      }
     } catch {
       finishSync(error: error.localizedDescription)
     }
@@ -539,10 +547,130 @@ final class ColmiRingService: NSObject, CBCentralManagerDelegate, CBPeripheralDe
           self.status = "Saved \(samples.count) COLMI sleep stages to Apple Health."
           self.onSleepSaved()
         } else {
-          self.finishSync(error: "Apple Health save failed: \(error?.localizedDescription ?? "unknown error")")
+          self.healthWriteFailure = error?.localizedDescription ?? "unknown HealthKit error"
+          self.uploadDirectlyToDaymark(stages)
         }
       }
     }
+  }
+
+  private func requestRingSleep(
+    _ peripheral: CBPeripheral,
+    commandCharacteristic: CBCharacteristic
+  ) {
+    bigDataBuffer.removeAll()
+    expectedBigDataLength = nil
+    let request = Data([0xbc, 0x27, 0x01, 0x00, 0xff, 0x00, 0xff])
+    let writeType: CBCharacteristicWriteType = commandCharacteristic.properties.contains(.write)
+      ? .withResponse
+      : .withoutResponse
+    peripheral.writeValue(request, for: commandCharacteristic, type: writeType)
+    status = syncDestination == .healthKit
+      ? "Downloading recent sleep from \(peripheral.name ?? "R04")…"
+      : "HealthKit signing is unavailable; downloading sleep for direct Daymark sync…"
+    startSyncTimeout()
+  }
+
+  private func uploadDirectlyToDaymark(_ stages: [ColmiSleepStage]) {
+    let payload = makeDirectDaymarkPayload(stages)
+    guard let samples = payload["samples"] as? [[String: Any]], !samples.isEmpty else {
+      finishSync(error: "No sleep from the current overnight window was available to send to Daymark.")
+      return
+    }
+
+    status = "Apple Health signing is unavailable; sending COLMI sleep directly to Daymark…"
+    onDirectDaymarkSync(payload) { [weak self] success in
+      DispatchQueue.main.async {
+        guard let self else { return }
+        self.syncTimeout?.cancel()
+        self.isSyncing = false
+        if success {
+          self.status = "Sent \(samples.count) COLMI sleep stages directly to Daymark. Apple Health remains blocked by the signing profile."
+        } else {
+          let reason = self.healthWriteFailure ?? "missing HealthKit entitlement"
+          self.status = "Apple Health is blocked (\(reason)), and the direct Daymark webhook failed. Check the webhook URL and try again."
+        }
+      }
+    }
+  }
+
+  private func makeDirectDaymarkPayload(_ stages: [ColmiSleepStage]) -> [String: Any] {
+    let now = Date()
+    let today = Calendar.current.startOfDay(for: now)
+    let windowStart = Calendar.current.date(byAdding: .hour, value: -6, to: today) ?? today
+    let recent = stages.filter { $0.end >= windowStart && $0.start <= now }
+
+    var minutesByType: [String: Double] = [:]
+    let samples = recent.map { stage -> [String: Any] in
+      let type: String
+      let label: String
+      switch stage.value {
+      case 2:
+        type = "SLEEP_AWAKE"
+        label = "awake"
+      case 3:
+        type = "SLEEP_LIGHT"
+        label = "core"
+      case 4:
+        type = "SLEEP_DEEP"
+        label = "deep"
+      case 5:
+        type = "SLEEP_REM"
+        label = "rem"
+      default:
+        type = "SLEEP_ASLEEP"
+        label = "asleepUnspecified"
+      }
+
+      let minutes = stage.end.timeIntervalSince(stage.start) / 60
+      minutesByType[type, default: 0] += minutes
+      return [
+        "uuid": stage.syncIdentifier,
+        "type": type,
+        "stage": label,
+        "value": stage.value,
+        "durationMinutes": minutes,
+        "unit": "category",
+        "dateFrom": ISO8601DateFormatter().string(from: stage.start),
+        "dateTo": ISO8601DateFormatter().string(from: stage.end),
+        "sourceName": "COLMI R04",
+        "sourceBundle": "daymark-colmi-direct",
+        "deviceModel": "R04",
+      ]
+    }
+
+    let totalAsleep = minutesByType["SLEEP_ASLEEP", default: 0]
+      + minutesByType["SLEEP_LIGHT", default: 0]
+      + minutesByType["SLEEP_DEEP", default: 0]
+      + minutesByType["SLEEP_REM", default: 0]
+    let dateFormatter = DateFormatter()
+    dateFormatter.calendar = .current
+    dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+    dateFormatter.dateFormat = "yyyy-MM-dd"
+
+    return [
+      "date": dateFormatter.string(from: now),
+      "generatedAt": ISO8601DateFormatter().string(from: now),
+      "startTime": ISO8601DateFormatter().string(from: today),
+      "endTime": ISO8601DateFormatter().string(from: now),
+      "sleepWindowStart": ISO8601DateFormatter().string(from: windowStart),
+      "appleWatchOnly": false,
+      "selectedTypes": Array(Set(samples.compactMap { $0["type"] as? String })).sorted(),
+      "summary": [
+        "SLEEP": [
+          "totalAsleepMinutes": totalAsleep,
+          "coreMinutes": minutesByType["SLEEP_LIGHT", default: 0],
+          "deepMinutes": minutesByType["SLEEP_DEEP", default: 0],
+          "remMinutes": minutesByType["SLEEP_REM", default: 0],
+          "awakeMinutes": minutesByType["SLEEP_AWAKE", default: 0],
+          "inBedMinutes": 0,
+          "samples": samples.count,
+        ],
+      ],
+      "samples": samples,
+      "source": "colmi-r04-direct",
+      "healthKitWriteError": healthWriteFailure ?? "",
+    ]
   }
 
   private func startSyncTimeout() {
