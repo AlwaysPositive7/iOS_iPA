@@ -102,7 +102,9 @@ class HealthService {
   bool _looksLikeAppleWatch(HealthDataPoint p) {
     final source = p.sourceName.toLowerCase();
     final model = (p.deviceModel ?? '').toLowerCase();
-    return source.contains('watch') || model.contains('watch');
+    return source.contains('watch') ||
+        model.contains('watch') ||
+        source.contains('daymark');
   }
 
   Map<String, dynamic> _makeSummary(List<HealthDataPoint> points) {

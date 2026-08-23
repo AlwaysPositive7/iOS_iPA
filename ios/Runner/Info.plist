@@ -29,13 +29,19 @@
 	<key>NSHealthShareUsageDescription</key>
 	<string>Daymark reads the health metrics you choose so it can sync today's Apple Health data to your personal dashboard.</string>
 	<key>NSHealthUpdateUsageDescription</key>
-	<string>Daymark uses HealthKit integration for your personal health dashboard.</string>
+	<string>Daymark saves sleep stages imported from your COLMI ring into Apple Health for your personal health dashboard.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Daymark connects directly to your COLMI R04 ring to import sleep stages into Apple Health.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
 	<string>Main</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
