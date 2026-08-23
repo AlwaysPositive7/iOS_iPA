@@ -1,125 +1,319 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:health/health.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'services/health_service.dart';
+import 'services/native_background_service.dart';
+import 'services/webhook_service.dart';
 
 void main() {
-  runApp(const MyApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const DaymarkHealthApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class DaymarkHealthApp extends StatelessWidget {
+  const DaymarkHealthApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      debugShowCheckedModeBanner: false,
+      title: 'Daymark Health',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a blue toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
         useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const HealthSettingsPage(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class HealthSettingsPage extends StatefulWidget {
+  const HealthSettingsPage({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<HealthSettingsPage> createState() => _HealthSettingsPageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _HealthSettingsPageState extends State<HealthSettingsPage> {
+  static const _defaultWebhookUrl =
+      'https://daymark-eight-sepia.vercel.app/api/health';
 
-  void _incrementCounter() {
+  final _health = HealthService();
+  final _webhook = WebhookService();
+  final _background = NativeBackgroundService();
+
+  final _urlController = TextEditingController();
+  final _tokenController = TextEditingController();
+
+  final Set<HealthDataType> _selected = {
+    HealthDataType.STEPS,
+    HealthDataType.ACTIVE_ENERGY_BURNED,
+    HealthDataType.HEART_RATE,
+    HealthDataType.RESTING_HEART_RATE,
+    HealthDataType.HEART_RATE_VARIABILITY_SDNN,
+  };
+
+  bool _appleWatchOnly = true;
+  int _intervalMinutes = 15;
+  bool _busy = false;
+  String _status = 'Ready to connect Apple Health';
+
+  @override
+  void initState() {
+    super.initState();
+    _init();
+  }
+
+  Future<void> _init() async {
+    await _health.configure();
+
+    final prefs = SharedPreferencesAsync();
+    final url = await prefs.getString('webhookUrl');
+    final token = await prefs.getString('bearerToken');
+    final interval = await prefs.getInt('intervalMinutes');
+    final watchOnly = await prefs.getBool('appleWatchOnly');
+    final selectedNames = await prefs.getStringList('selectedTypes');
+
+    if (!mounted) return;
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _urlController.text = url ?? _defaultWebhookUrl;
+      _tokenController.text = token ?? '';
+      _intervalMinutes = interval ?? 15;
+      _appleWatchOnly = watchOnly ?? true;
+
+      if (selectedNames != null && selectedNames.isNotEmpty) {
+        _selected
+          ..clear()
+          ..addAll(
+            supportedMetrics
+                .where((m) => selectedNames.contains(m.type.name))
+                .map((m) => m.type),
+          );
+      }
     });
+  }
+
+  Future<void> _saveSettings() async {
+    final prefs = SharedPreferencesAsync();
+    await prefs.setString('webhookUrl', _urlController.text.trim());
+    await prefs.setString('bearerToken', _tokenController.text.trim());
+    await prefs.setInt('intervalMinutes', _intervalMinutes);
+    await prefs.setBool('appleWatchOnly', _appleWatchOnly);
+    await prefs.setStringList(
+      'selectedTypes',
+      _selected.map((e) => e.name).toList(),
+    );
+  }
+
+  Future<void> _authorize() async {
+    await _run(() async {
+      if (!Platform.isIOS) {
+        throw UnsupportedError('This starter is configured for iPhone/HealthKit.');
+      }
+
+      final ok = await _health.requestReadPermission(_selected.toList());
+      await _saveSettings();
+
+      setState(() {
+        _status = ok
+            ? 'HealthKit permission request completed'
+            : 'HealthKit permission was not granted';
+      });
+    });
+  }
+
+  Future<void> _syncNow() async {
+    await _run(() async {
+      _validateSettings();
+      await _saveSettings();
+
+      final payload = await _health.buildTodayPayload(
+        types: _selected.toList(),
+        appleWatchOnly: _appleWatchOnly,
+      );
+
+      await _webhook.send(
+        webhookUrl: _urlController.text,
+        bearerToken: _tokenController.text,
+        payload: payload,
+      );
+
+      setState(() {
+        _status = 'Sent today\'s HealthKit data at ${TimeOfDay.now().format(context)}';
+      });
+    });
+  }
+
+  Future<void> _enableBackground() async {
+    await _run(() async {
+      _validateSettings();
+      await _saveSettings();
+
+      await _background.configure(
+        webhookUrl: _urlController.text,
+        bearerToken: _tokenController.text,
+        types: _selected.toList(),
+        minimumIntervalMinutes: _intervalMinutes,
+        appleWatchOnly: _appleWatchOnly,
+      );
+
+      setState(() {
+        _status =
+            'Background HealthKit delivery enabled; webhook throttled to $_intervalMinutes min';
+      });
+    });
+  }
+
+  Future<void> _disableBackground() async {
+    await _run(() async {
+      await _background.disable();
+      setState(() {
+        _status = 'Background delivery disabled';
+      });
+    });
+  }
+
+  void _validateSettings() {
+    if (_selected.isEmpty) {
+      throw StateError('Select at least one metric.');
+    }
+    final uri = Uri.tryParse(_urlController.text.trim());
+    if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) {
+      throw StateError('Enter a valid HTTPS webhook URL.');
+    }
+  }
+
+  Future<void> _run(Future<void> Function() action) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+
+    try {
+      await action();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _status = 'Error: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    _tokenController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text(
-              'You have pushed the button this many times:',
+      appBar: AppBar(title: const Text('Daymark Health')),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          const Text(
+            'Health data to sync',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 8),
+          ...supportedMetrics.map(
+            (metric) => CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(metric.label),
+              value: _selected.contains(metric.type),
+              onChanged: _busy
+                  ? null
+                  : (value) {
+                      setState(() {
+                        if (value == true) {
+                          _selected.add(metric.type);
+                        } else {
+                          _selected.remove(metric.type);
+                        }
+                      });
+                    },
             ),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Apple Watch samples only'),
+            subtitle: const Text(
+              'Filters samples whose source/device looks like an Apple Watch.',
             ),
-          ],
-        ),
+            value: _appleWatchOnly,
+            onChanged: _busy ? null : (v) => setState(() => _appleWatchOnly = v),
+          ),
+          const Divider(height: 36),
+          TextField(
+            controller: _urlController,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            decoration: const InputDecoration(
+              labelText: 'Webhook URL',
+              hintText: 'https://your-domain.com/api/health/ingest',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _tokenController,
+            obscureText: true,
+            autocorrect: false,
+            decoration: const InputDecoration(
+              labelText: 'Bearer token (optional)',
+              helperText: 'Leave blank for your current Daymark endpoint.',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 20),
+          DropdownButtonFormField<int>(
+            initialValue: _intervalMinutes,
+            decoration: const InputDecoration(
+              labelText: 'Minimum webhook interval',
+              border: OutlineInputBorder(),
+            ),
+            items: const [5, 15, 30, 60]
+                .map(
+                  (m) => DropdownMenuItem(
+                    value: m,
+                    child: Text('$m minutes'),
+                  ),
+                )
+                .toList(),
+            onChanged: _busy
+                ? null
+                : (v) => setState(() => _intervalMinutes = v ?? 15),
+          ),
+          const SizedBox(height: 20),
+          FilledButton(
+            onPressed: _busy ? null : _authorize,
+            child: const Text('1. Request HealthKit Permission'),
+          ),
+          const SizedBox(height: 10),
+          FilledButton(
+            onPressed: _busy ? null : _syncNow,
+            child: const Text('2. Send Today Now'),
+          ),
+          const SizedBox(height: 10),
+          FilledButton(
+            onPressed: _busy ? null : _enableBackground,
+            child: const Text('3. Enable Background Sync'),
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton(
+            onPressed: _busy ? null : _disableBackground,
+            child: const Text('Disable Background Sync'),
+          ),
+          const SizedBox(height: 24),
+          Text(
+            _busy ? 'Working…' : _status,
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
+        ],
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
     );
   }
 }
