@@ -6,7 +6,9 @@ import UIKit
 @objc class AppDelegate: FlutterAppDelegate {
   private let healthStore = HKHealthStore()
   private let channelName = "daymark_health/background"
+  private let colmiChannelName = "daymark_health/colmi"
   private var observerQueries: [HKObserverQuery] = []
+  private var colmiRingService: ColmiRingService?
 
   private let webhookKey = "daymark.webhookUrl"
   private let tokenKey = "daymark.bearerToken"
@@ -64,6 +66,60 @@ import UIKit
         case "disable":
           UserDefaults.standard.set(false, forKey: self.enabledKey)
           self.stopObservers()
+          result(nil)
+
+        default:
+          result(FlutterMethodNotImplemented)
+        }
+      }
+
+      let ringService = ColmiRingService(healthStore: healthStore) { [weak self] in
+        self?.handleHealthKitChange(completion: {})
+      }
+      colmiRingService = ringService
+
+      let colmiChannel = FlutterMethodChannel(
+        name: colmiChannelName,
+        binaryMessenger: controller.binaryMessenger
+      )
+
+      colmiChannel.setMethodCallHandler { call, result in
+        switch call.method {
+        case "getState":
+          result(ringService.snapshot())
+
+        case "startScan":
+          ringService.startScan()
+          result(nil)
+
+        case "connect":
+          guard
+            let args = call.arguments as? [String: Any],
+            let id = args["id"] as? String
+          else {
+            result(FlutterError(code: "BAD_ARGS", message: "Select a ring first.", details: nil))
+            return
+          }
+
+          do {
+            try ringService.connect(id: id)
+            result(nil)
+          } catch {
+            result(
+              FlutterError(
+                code: "CONNECT_FAILED",
+                message: error.localizedDescription,
+                details: nil
+              )
+            )
+          }
+
+        case "disconnect":
+          ringService.disconnect()
+          result(nil)
+
+        case "syncSleep":
+          ringService.syncSleep()
           result(nil)
 
         default:
@@ -491,7 +547,11 @@ import UIKit
 
   private func looksLikeAppleWatch(_ sample: HKSample) -> Bool {
     let source = sample.sourceRevision.source.name.lowercased()
+    let bundle = sample.sourceRevision.source.bundleIdentifier.lowercased()
     let model = (sample.device?.model ?? "").lowercased()
-    return source.contains("watch") || model.contains("watch")
+    let ownBundle = Bundle.main.bundleIdentifier?.lowercased()
+    return source.contains("watch")
+      || model.contains("watch")
+      || (ownBundle != nil && bundle == ownBundle)
   }
 }

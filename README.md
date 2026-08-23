@@ -22,6 +22,25 @@ Actions tab.
 6. Tap **Send Today Now** to test the webhook.
 7. Tap **Enable Background Sync**.
 
+## COLMI R04 sleep import
+
+This build connects to a COLMI R04 in the same Daymark Health app and writes its
+sleep stages into Apple Health. It supports the QRing Bluetooth firmware family:
+
+1. Charge and wake the ring, then fully close the QRing app so it releases the
+   Bluetooth connection.
+2. In Daymark Health, tap **Scan** in the COLMI R04 section.
+3. Select the ring, tap **Connect**, and wait for “Ready to sync sleep.”
+4. Tap **Sync Sleep to Apple Health** and approve Apple Health write access.
+5. Use **Send Today Now**, or leave background sync enabled, to send the newly
+   imported sleep data to Daymark.
+
+COLMI has shipped similar model names with different protocol families. If the
+R04 was supplied for the SmartHealth app rather than QRing, it will not expose
+the QRing sleep service and this build will report that a different driver is
+needed. PulseLoop documents the broader R0x family but does not list an R04 as a
+hardware-verified model, so real-device testing is required.
+
 ## iOS behavior
 
 - The deployment target is iOS 15 because the current `health` package requires
@@ -34,3 +53,9 @@ Actions tab.
   event or a manual foreground sync catches the dashboard up.
 - The IPA is unsigned. The sideloading service must re-sign the HealthKit
   entitlements for HealthKit access to work on the device.
+- Ring sleep requests are manual and local. The app does not use a COLMI cloud
+  account; it reads the QRing BLE history and writes category samples directly
+  to HealthKit.
+
+Protocol attribution and licensing are recorded in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

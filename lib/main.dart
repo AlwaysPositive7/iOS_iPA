@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:health/health.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'services/colmi_ring_service.dart';
 import 'services/health_service.dart';
 import 'services/native_background_service.dart';
 import 'services/webhook_service.dart';
@@ -44,6 +46,7 @@ class _HealthSettingsPageState extends State<HealthSettingsPage> {
   final _health = HealthService();
   final _webhook = WebhookService();
   final _background = NativeBackgroundService();
+  final _ring = ColmiRingService();
 
   final _urlController = TextEditingController();
   final _tokenController = TextEditingController();
@@ -60,12 +63,64 @@ class _HealthSettingsPageState extends State<HealthSettingsPage> {
   bool _appleWatchOnly = true;
   int _intervalMinutes = 15;
   bool _busy = false;
+  bool _ringBusy = false;
   String _status = 'Ready to connect Apple Health';
+  ColmiRingState? _ringState;
+  String? _selectedRingId;
+  Timer? _ringPollTimer;
 
   @override
   void initState() {
     super.initState();
     _init();
+    if (Platform.isIOS) {
+      _refreshRingState();
+      _ringPollTimer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => _refreshRingState(),
+      );
+    }
+  }
+
+  Future<void> _refreshRingState() async {
+    try {
+      final state = await _ring.getState();
+      if (!mounted) return;
+      setState(() {
+        _ringState = state;
+        if (_selectedRingId == null ||
+            !state.devices.any((device) => device.id == _selectedRingId)) {
+          _selectedRingId = state.connectedId ??
+              (state.devices.isEmpty ? null : state.devices.first.id);
+        }
+      });
+    } catch (_) {
+      // Native channel is iOS-only. The rest of the app can still render.
+    }
+  }
+
+  Future<void> _runRing(Future<void> Function() action) async {
+    if (_ringBusy) return;
+    setState(() => _ringBusy = true);
+    try {
+      await action();
+      await _refreshRingState();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _ringState = ColmiRingState(
+          devices: _ringState?.devices ?? const [],
+          connectedId: _ringState?.connectedId,
+          connectedName: _ringState?.connectedName,
+          status: 'Ring error: $e',
+          isScanning: false,
+          isConnected: _ringState?.isConnected ?? false,
+          isSyncing: false,
+        );
+      });
+    } finally {
+      if (mounted) setState(() => _ringBusy = false);
+    }
   }
 
   Future<void> _init() async {
@@ -219,6 +274,7 @@ class _HealthSettingsPageState extends State<HealthSettingsPage> {
 
   @override
   void dispose() {
+    _ringPollTimer?.cancel();
     _urlController.dispose();
     _tokenController.dispose();
     super.dispose();
@@ -263,10 +319,99 @@ class _HealthSettingsPageState extends State<HealthSettingsPage> {
             contentPadding: EdgeInsets.zero,
             title: const Text('Apple Watch samples only'),
             subtitle: const Text(
-              'Filters samples whose source/device looks like an Apple Watch.',
+              'Keeps Apple Watch samples plus COLMI sleep imported by Daymark.',
             ),
             value: _appleWatchOnly,
             onChanged: _busy ? null : (v) => setState(() => _appleWatchOnly = v),
+          ),
+          const SizedBox(height: 12),
+          Card(
+            margin: EdgeInsets.zero,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'COLMI R04 sleep import',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'For R04 rings that use the QRing Bluetooth protocol. Sleep stages are saved into Apple Health, then included in Daymark syncs.',
+                  ),
+                  const SizedBox(height: 14),
+                  if ((_ringState?.devices ?? const []).isNotEmpty)
+                    DropdownButtonFormField<String>(
+                      initialValue: _selectedRingId,
+                      decoration: const InputDecoration(
+                        labelText: 'Discovered ring',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: _ringState!.devices
+                          .map(
+                            (device) => DropdownMenuItem(
+                              value: device.id,
+                              child: Text('${device.name} (${device.rssi} dBm)'),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: _ringBusy
+                          ? null
+                          : (id) => setState(() => _selectedRingId = id),
+                    ),
+                  if ((_ringState?.devices ?? const []).isNotEmpty)
+                    const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: _ringBusy || (_ringState?.isScanning ?? false)
+                            ? null
+                            : () => _runRing(_ring.startScan),
+                        icon: const Icon(Icons.bluetooth_searching),
+                        label: Text(
+                          (_ringState?.isScanning ?? false) ? 'Scanning…' : 'Scan',
+                        ),
+                      ),
+                      OutlinedButton(
+                        onPressed: _ringBusy || _selectedRingId == null
+                            ? null
+                            : () => _runRing(
+                                  () => _ring.connect(_selectedRingId!),
+                                ),
+                        child: const Text('Connect'),
+                      ),
+                      FilledButton(
+                        onPressed: _ringBusy ||
+                                !(_ringState?.isConnected ?? false) ||
+                                (_ringState?.isSyncing ?? false)
+                            ? null
+                            : () => _runRing(_ring.syncSleep),
+                        child: Text(
+                          (_ringState?.isSyncing ?? false)
+                              ? 'Syncing…'
+                              : 'Sync Sleep to Apple Health',
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _ringBusy ||
+                                !(_ringState?.isConnected ?? false)
+                            ? null
+                            : () => _runRing(_ring.disconnect),
+                        child: const Text('Disconnect'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    _ringState?.status ?? 'Bluetooth ring service is starting…',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
           ),
           const Divider(height: 36),
           TextField(
